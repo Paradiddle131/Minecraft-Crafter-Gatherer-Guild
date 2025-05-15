@@ -1,0 +1,7 @@
+[project]
+name = "minecraft-crafter-gatherer-guild"
+version = "0.1.0"
+description = "Minecraft Crafter-Gatherer Agents built using Google's ADK"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
