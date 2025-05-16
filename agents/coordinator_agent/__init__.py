@@ -1,1 +1,3 @@
-from . import agent
+from .agent import CoordinatorAgent
+
+__all__ = ["CoordinatorAgent"]

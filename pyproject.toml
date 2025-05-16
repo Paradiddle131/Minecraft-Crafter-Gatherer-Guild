@@ -4,4 +4,8 @@ version = "0.1.0"
 description = "Minecraft Crafter-Gatherer Agents built using Google's ADK"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "google-adk>=0.5.0",
+    "javascript>=1!1.2.2",
+    "pydantic-settings>=2.9.1",
+]
