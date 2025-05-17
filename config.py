@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     minecraft_port: int = 25565
     minecraft_bot_username: str = "ADK_Guild_Bot_Pydantic"
     minecraft_auth: str = "offline"
+    minecraft_version: str = "1.21"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
