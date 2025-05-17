@@ -1,7 +1,7 @@
 from google.adk.agents import LlmAgent
 from google.adk.tools import google_search
 from .prompts import CRAFTER_AGENT_INSTRUCTION
-from ...tools.mineflayer_bridge_tools import (
+from tools.mineflayer_bridge_tools import (
     craft_target_item_tool,
     view_bot_inventory_tool,
     memorize_recipe_tool

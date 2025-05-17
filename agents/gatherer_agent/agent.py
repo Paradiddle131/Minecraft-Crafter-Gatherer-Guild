@@ -1,6 +1,6 @@
 from google.adk.agents import LlmAgent
 from .prompts import GATHERER_AGENT_INSTRUCTION
-from ...tools.mineflayer_bridge_tools import (
+from tools.mineflayer_bridge_tools import (
     find_nearest_block_tool,
     move_to_xyz_tool,
     mine_target_block_tool,
