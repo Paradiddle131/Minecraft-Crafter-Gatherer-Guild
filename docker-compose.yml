@@ -1,0 +1,13 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crafter_gatherer_guild_app
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    tty: true
+    stdin_open: true
