@@ -5,25 +5,47 @@ let bot = null;
 let mcData = null;
 
 function initializeBot(options) {
-  if (bot) {
-    console.log('Mineflayer Bot already initialized.');
-    return { status: "already_initialized", username: bot.username };
-  }
-  try {
-    bot = mineflayer.createBot(options);
-    bot.loadPlugin(pathfinder);
-    mcData = require('minecraft-data')(bot.version);
+  return new Promise((resolve, reject) => {
+    if (bot) {
+      console.log('Mineflayer Bot already initialized.');
+      resolve({ status: "already_initialized", username: bot.username });
+      return;
+    }
+    try {
+      bot = mineflayer.createBot(options);
+      bot.loadPlugin(pathfinder);
+      
+      bot.once('login', () => {
+        mcData = require('minecraft-data')(bot.version);
+      });
 
-    bot.once('spawn', () => {
-      console.log(`Mineflayer Bot '${bot.username}' spawned in ADK project.`);
-    });
-    bot.on('error', (err) => console.error('Mineflayer Bot Error:', err));
-    bot.on('kicked', (reason) => console.log('Mineflayer Bot Kicked:', reason));
-    return { status: "success", username: bot.username, message: "Mineflayer bot initialized and attempting to connect." };
-  } catch (error) {
-    console.error('Failed to initialize Mineflayer bot:', error);
-    return { status: "error", message: error.message };
-  }
+      bot.once('spawn', () => {
+        console.log(`Mineflayer Bot '${bot.username}' spawned in ADK project.`);
+        resolve({ status: "success", username: bot.username, message: "Mineflayer bot initialized and spawned." });
+      });
+
+      bot.on('error', (err) => {
+        console.error('Mineflayer Bot Error:', err);
+        // If bot is not yet initialized, reject the promise.
+        // If it's an error after spawn, it will just be logged.
+        if (!bot.username) { // A way to check if spawn hasn't occurred
+            reject({ status: "error", message: `Mineflayer Bot Error before spawn: ${err.message}` });
+        }
+      });
+
+      bot.on('kicked', (reason) => {
+        console.log('Mineflayer Bot Kicked:', reason);
+        // If bot is not yet initialized, reject the promise.
+        if (!bot.username) {
+             reject({ status: "error", message: `Mineflayer Bot Kicked before spawn: ${reason}` });
+        }
+      });
+
+    } catch (error) {
+      console.error('Failed to initialize Mineflayer bot (catch block):', error);
+      reject({ status: "error", message: error.message });
+    }
+  });
 }
 
 async function goToXYZ(x, y, z) {
