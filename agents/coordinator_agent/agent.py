@@ -3,8 +3,7 @@ from google.adk.tools.agent_tool import AgentTool
 from .prompts import COORDINATOR_AGENT_INSTRUCTION_PICKAXE_MVP
 from agents.gatherer_agent import GathererAgent
 from agents.crafter_agent import CrafterAgent
-
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+from config import settings
 
 class CoordinatorAgent(LlmAgent):
     """
@@ -25,7 +24,7 @@ class CoordinatorAgent(LlmAgent):
         )
 
         super().__init__(
-            model=GEMINI_MODEL_NAME,
+            model=settings.gemini_model_name,
             name="CoordinatorAgent",
             description="Coordinates Gatherer and Crafter agents to achieve high-level goals.",
             instruction=COORDINATOR_AGENT_INSTRUCTION_PICKAXE_MVP,

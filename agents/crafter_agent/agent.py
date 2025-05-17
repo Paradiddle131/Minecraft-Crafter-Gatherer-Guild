@@ -6,8 +6,7 @@ from tools.mineflayer_bridge_tools import (
     view_bot_inventory_tool,
     memorize_recipe_tool
 )
-
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+from config import settings
 
 class CrafterAgent(LlmAgent):
     """
@@ -16,7 +15,7 @@ class CrafterAgent(LlmAgent):
     """
     def __init__(self):
         super().__init__(
-            model=GEMINI_MODEL_NAME,
+            model=settings.gemini_model_name,
             name="CrafterAgent",
             description="Crafts items in Minecraft. Can search for and memorize recipes.",
             instruction=CRAFTER_AGENT_INSTRUCTION,

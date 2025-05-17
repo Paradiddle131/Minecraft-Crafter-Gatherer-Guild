@@ -7,8 +7,7 @@ from tools.mineflayer_bridge_tools import (
     view_bot_inventory_tool,
     place_item_block_tool
 )
-
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+from config import settings
 
 class GathererAgent(LlmAgent):
     """
@@ -17,7 +16,7 @@ class GathererAgent(LlmAgent):
     """
     def __init__(self):
         super().__init__(
-            model=GEMINI_MODEL_NAME,
+            model=settings.gemini_model_name,
             name="GathererAgent",
             description="Collects resources like wood, stone, etc., and can place blocks in Minecraft.",
             instruction=GATHERER_AGENT_INSTRUCTION,

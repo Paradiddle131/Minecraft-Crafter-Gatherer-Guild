@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     minecraft_bot_username: str = "ADK_Guild_Bot_Pydantic"
     minecraft_auth: str = "offline"
     minecraft_version: str = "1.21"
+    gemini_model_name: str = "gemini-2.5-flash-preview-04-17"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
