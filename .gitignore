@@ -20,13 +20,12 @@ package-lock.json
 venv/
 ENV/
 
-# ADK specific (if any, like local logs or temp files)
-adk_runner_logs/
-*.session.json
-
 # IDE specific
 .idea/
 .vscode/
 
 # Dependency management
 uv.lock
+
+# logs
+logs/
