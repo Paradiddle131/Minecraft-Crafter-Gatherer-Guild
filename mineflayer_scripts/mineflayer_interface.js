@@ -1,5 +1,6 @@
 const mineflayer = require('mineflayer');
 const mineflayerPathfinder = require('mineflayer-pathfinder');
+var Vec3 = require('vec3').Vec3;
 
 let bot = null;
 let mcData = null;
@@ -125,7 +126,7 @@ function findBlock(blockTypeName, maxDistance = 32, count = 1) {
 
 async function mineBlock(blockTypeName, x, y, z) {
   if (!bot) return { status: "error", message: "Bot not initialized." };
-  const targetBlock = bot.blockAt(new bot.registry.Vec3(x, y, z));
+  const targetBlock = bot.blockAt(new Vec3(x, y, z));
   if (!targetBlock || targetBlock.name !== blockTypeName) {
     return { status: "error", message: `Block at ${x},${y},${z} is not ${blockTypeName}. It is ${targetBlock?.name}` };
   }
@@ -175,11 +176,11 @@ async function placeBlock(itemName, x, y, z, refBlockX, refBlockY, refBlockZ, fa
         return { status: "error", message: `Item ${itemName} not in inventory.` };
     }
 
-    const referenceBlock = bot.blockAt(new bot.registry.Vec3(refBlockX, refBlockY, refBlockZ));
+    const referenceBlock = bot.blockAt(new Vec3(refBlockX, refBlockY, refBlockZ));
     if (!referenceBlock) {
         return { status: "error", message: "Reference block not found." };
     }
-    const faceVec = new bot.registry.Vec3(faceVectorX, faceVectorY, faceVectorZ);
+    const faceVec = new Vec3(faceVectorX, faceVectorY, faceVectorZ);
 
     try {
         await bot.equip(itemToPlace, 'hand'); // Equip the item first
