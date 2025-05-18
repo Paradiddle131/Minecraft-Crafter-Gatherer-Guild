@@ -1,62 +1,116 @@
 const mineflayer = require('mineflayer');
-const { pathfinder, Movements } = require('mineflayer-pathfinder');
+const mineflayerPathfinder = require('mineflayer-pathfinder');
 
 let bot = null;
 let mcData = null;
 
-function initializeBot(options) {
-  return new Promise((resolve, reject) => {
-    if (bot) {
-      console.log('Mineflayer Bot already initialized.');
-      resolve({ status: "already_initialized", username: bot.username });
-      return;
-    }
+async function initializeBot(options) {
+  if (bot && bot.username && bot.entity) {
+    console.log('Mineflayer Bot already initialized and spawned.');
+    return { status: "already_initialized", username: bot.username };
+  }
+
+  if (bot) {
+    console.log('Cleaning up existing bot instance before re-initialization.');
     try {
-      bot = mineflayer.createBot(options);
-      bot.loadPlugin(pathfinder);
-      
-      bot.once('login', () => {
-        mcData = require('minecraft-data')(bot.version);
-      });
-
-      bot.once('spawn', () => {
-        console.log(`Mineflayer Bot '${bot.username}' spawned in ADK project.`);
-        resolve({ status: "success", username: bot.username, message: "Mineflayer bot initialized and spawned." });
-      });
-
-      bot.on('error', (err) => {
-        console.error('Mineflayer Bot Error:', err);
-        // If bot is not yet initialized, reject the promise.
-        // If it's an error after spawn, it will just be logged.
-        if (!bot.username) { // A way to check if spawn hasn't occurred
-            reject({ status: "error", message: `Mineflayer Bot Error before spawn: ${err.message}` });
-        }
-      });
-
-      bot.on('kicked', (reason) => {
-        console.log('Mineflayer Bot Kicked:', reason);
-        // If bot is not yet initialized, reject the promise.
-        if (!bot.username) {
-             reject({ status: "error", message: `Mineflayer Bot Kicked before spawn: ${reason}` });
-        }
-      });
-
-    } catch (error) {
-      console.error('Failed to initialize Mineflayer bot (catch block):', error);
-      reject({ status: "error", message: error.message });
+      bot.quit('Re-initializing');
+    } catch (e) {
+      console.warn('Error quitting existing bot instance:', e.message);
     }
-  });
+    bot = null;
+    mcData = null;
+  }
+
+  console.log('Creating new Mineflayer bot instance with options:', options);
+  bot = mineflayer.createBot(options);
+  bot.loadPlugin(mineflayerPathfinder.pathfinder);
+
+  try {
+    await new Promise((resolve, reject) => {
+      let spawned = false;
+      
+      const listeners = {
+        loginListener: () => {
+          try {
+            mcData = require('minecraft-data')(bot.version);
+            console.log(`Mineflayer Bot logged in. mcData version: ${bot.version}. Username: ${bot.username}`);
+          } catch (mcDataError) {
+            console.error('Failed to load minecraft-data:', mcDataError);
+            if (!spawned) reject(new Error(`Failed to load minecraft-data: ${mcDataError.message}`));
+          }
+        },
+        spawnListener: () => {
+          spawned = true;
+          console.log(`Mineflayer Bot '${bot.username}' spawned in ADK project.`);
+          bot.removeListener('error', listeners.errorListener);
+          bot.removeListener('kicked', listeners.kickListener);
+          bot.removeListener('login', listeners.loginListener);
+          
+          bot.on('error', (err) => console.error('Mineflayer Bot Error (post-spawn):', err));
+          bot.on('kicked', (reason) => console.log('Mineflayer Bot Kicked (post-spawn):', reason));
+          
+          resolve();
+
+          // Optional initial teleport
+          if (options.initial_teleport_coords &&
+              Array.isArray(options.initial_teleport_coords) &&
+              options.initial_teleport_coords.length === 3 &&
+              options.initial_teleport_coords.every(coord => typeof coord === 'number')) {
+            
+            const [tpX, tpY, tpZ] = options.initial_teleport_coords;
+            console.log(`Teleporting the bot '${bot.username}' to ${tpX} ${tpY} ${tpZ}`);
+            bot.chat(`/tp ${bot.username} ${tpX} ${tpY} ${tpZ}`);
+          }
+        },
+        errorListener: (err) => {
+          if (!spawned) {
+            console.error('Mineflayer Bot Error (pre-spawn):', err);
+            bot.removeListener('login', listeners.loginListener);
+            bot.removeListener('spawn', listeners.spawnListener);
+            bot.removeListener('kicked', listeners.kickListener);
+            reject(err);
+          }
+        },
+        kickListener: (reason) => {
+          if (!spawned) {
+            console.log('Mineflayer Bot Kicked (pre-spawn):', reason);
+            bot.removeListener('login', listeners.loginListener);
+            bot.removeListener('spawn', listeners.spawnListener);
+            bot.removeListener('error', listeners.errorListener);
+            reject(new Error(String(reason)));
+          }
+        }
+      };
+      
+      bot.once('login', listeners.loginListener);
+      bot.once('spawn', listeners.spawnListener);
+      bot.once('error', listeners.errorListener);
+      bot.once('kicked', listeners.kickListener);
+    });
+
+    return { status: "success", username: bot.username, message: "Mineflayer bot initialized and spawned." };
+
+  } catch (error) {
+    console.error('Failed to initialize Mineflayer bot (outer promise catch):', error);
+    if (bot) {
+        try { bot.quit('Initialization failed'); } catch (e) { /* ignore */ }
+        bot = null;
+        mcData = null;
+    }
+    const errorMessage = error && error.message ? error.message : "Unknown error during initialization.";
+    return { status: "error", message: errorMessage };
+  }
 }
 
 async function goToXYZ(x, y, z) {
   if (!bot || !bot.pathfinder) return { status: "error", message: "Bot not initialized or pathfinder not loaded." };
-  const defaultMove = new Movements(bot, mcData);
+  const defaultMove = new mineflayerPathfinder.Movements(bot, mcData);
   bot.pathfinder.setMovements(defaultMove);
-  bot.pathfinder.setGoal(new pathfinder.goals.GoalBlock(x, y, z));
+  bot.pathfinder.setGoal(new mineflayerPathfinder.goals.GoalBlock(x, y, z));
   return { status: "navigation_started" }; // Pathfinding is async, completion needs event handling or polling in JS if required by Python.
 }
 
-async function findBlock(blockTypeName, maxDistance = 32, count = 1) {
+function findBlock(blockTypeName, maxDistance = 32, count = 1) {
   if (!bot || !bot.registry) return { status: "error", message: "Bot not initialized or registry not available." };
   const block = bot.findBlock({
     matching: bot.registry.blocksByName[blockTypeName]?.id,
