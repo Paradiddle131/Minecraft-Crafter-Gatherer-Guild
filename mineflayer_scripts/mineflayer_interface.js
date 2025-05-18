@@ -103,15 +103,82 @@ async function initializeBot(options) {
   }
 }
 
-async function goToXYZ(x, y, z) {
-  if (!bot || !bot.pathfinder) return { status: "error", message: "Bot not initialized or pathfinder not loaded." };
+async function goToXYZ(x, y, z, operationId) {
+  if (!bot || !bot.pathfinder) {
+    const errorResult = { operationId, status: "error", message: "Bot not initialized or pathfinder not loaded." };
+    if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+    return errorResult;
+  }
+  if (!mcData) {
+    const errorResult = { operationId, status: "error", message: "mcData not initialized. Bot might not be fully logged in." };
+    if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+    return errorResult;
+  }
+
+  console.log(`JS: goToXYZ(${x}, ${y}, ${z}) called with operationId: ${operationId}`);
+
   const defaultMove = new mineflayerPathfinder.Movements(bot, mcData);
   bot.pathfinder.setMovements(defaultMove);
-  bot.pathfinder.setGoal(new mineflayerPathfinder.goals.GoalBlock(x, y, z));
-  return { status: "navigation_started" }; // Pathfinding is async, completion needs event handling or polling in JS if required by Python.
+  const goal = new mineflayerPathfinder.goals.GoalBlock(x, y, z);
+  
+  new Promise((resolveInternal, rejectInternal) => {
+    bot.pathfinder.setGoal(goal);
+
+    const onGoalReached = () => {
+      cleanupListeners();
+      console.log(`JS: Reached goal for operationId ${operationId}: ${x}, ${y}, ${z}`);
+      if (global.python) {
+        global.python.emit('mineflayerTaskComplete', { operationId, status: "success", message: `Reached goal: ${x}, ${y}, ${z}` });
+      }
+      resolveInternal({ status: "success", message: `Reached goal: ${x}, ${y}, ${z}` });
+    };
+
+    const onPathError = (err) => {
+      cleanupListeners();
+      console.error(`JS: Pathfinding error for operationId ${operationId} (goal ${x},${y},${z}): ${err}`);
+      if (global.python) {
+        global.python.emit('mineflayerTaskComplete', { operationId, status: "error", message: `Pathfinding error: ${err}` });
+      }
+      rejectInternal({ status: "error", message: `Pathfinding error: ${err}` });
+    };
+    
+    const onPathNoWay = () => {
+        cleanupListeners();
+        console.error(`JS: No path found for operationId ${operationId} (goal ${x},${y},${z}).`);
+        if (global.python) {
+            global.python.emit('mineflayerTaskComplete', { operationId, status: "error", message: `No path found to goal ${x},${y},${z}.` });
+        }
+        rejectInternal({ status: "error", message: `No path found to goal ${x},${y},${z}.` });
+    };
+
+    const cleanupListeners = () => {
+      bot.removeListener('goal_reached', onGoalReached);
+      bot.removeListener('path_update_error', onPathError);
+      bot.removeListener('path_no_way', onPathNoWay);
+      clearTimeout(navigationTimeout);
+    };
+
+    bot.once('goal_reached', onGoalReached);
+    bot.once('path_update_error', onPathError);
+    bot.once('path_no_way', onPathNoWay);
+
+    const navigationTimeout = setTimeout(() => {
+        cleanupListeners();
+        bot.pathfinder.stop();
+        console.error(`JS: Navigation timeout for operationId ${operationId} (goal ${x},${y},${z})`);
+        if (global.python) {
+            global.python.emit('mineflayerTaskComplete', { operationId, status: "error", message: `Navigation timed out for goal ${x},${y},${z}` });
+        }
+        rejectInternal({ status: "error", message: `Navigation timed out for goal ${x},${y},${z}` });
+    }, 60000);
+  }).catch(err => {
+    console.warn(`JS: Promise for operationId ${operationId} rejected (error already emitted to Python): ${err.message || err}`);
+  });
+
+  return { status: "pending", operationId: operationId, message: `Navigation to (${x},${y},${z}) initiated.` };
 }
 
-function findBlock(blockTypeName, maxDistance = 32, count = 1) {
+function findBlock(blockTypeName, maxDistance = 64, count = 1) {
   if (!bot || !bot.registry) return { status: "error", message: "Bot not initialized or registry not available." };
   const block = bot.findBlock({
     matching: bot.registry.blocksByName[blockTypeName]?.id,
@@ -124,21 +191,52 @@ function findBlock(blockTypeName, maxDistance = 32, count = 1) {
   return { status: "error", message: `${blockTypeName} not found within ${maxDistance} blocks.` };
 }
 
-async function mineBlock(blockTypeName, x, y, z) {
-  if (!bot) return { status: "error", message: "Bot not initialized." };
+async function mineBlock(blockTypeName, x, y, z, operationId) {
+  if (!bot) {
+    const errorResult = { operationId, status: "error", message: "Bot not initialized." };
+    if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+    return errorResult;
+  }
+  console.log(`JS: mineBlock(${blockTypeName}, ${x},${y},${z}) called with operationId: ${operationId}`);
+
   const targetBlock = bot.blockAt(new Vec3(x, y, z));
   if (!targetBlock || targetBlock.name !== blockTypeName) {
-    return { status: "error", message: `Block at ${x},${y},${z} is not ${blockTypeName}. It is ${targetBlock?.name}` };
+    const errorMsg = `Block at ${x},${y},${z} is not ${blockTypeName}. It is ${targetBlock?.name}`;
+    const errorResult = { operationId, status: "error", message: errorMsg };
+    if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+    return errorResult;
   }
   if (!bot.canDigBlock(targetBlock)) {
-    return { status: "error", message: `Cannot dig ${blockTypeName} at ${x},${y},${z}. Might need a better tool.` };
+    const errorMsg = `Cannot dig ${blockTypeName} at ${x},${y},${z}. Might need a better tool.`;
+    const errorResult = { operationId, status: "error", message: errorMsg };
+    if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+    return errorResult;
   }
-  try {
-    await bot.dig(targetBlock);
-    return { status: "success", collected_item: blockTypeName }; // Simplified, real collection is event-driven
-  } catch (err) {
-    return { status: "error", message: `Mining failed: ${err.message}` };
-  }
+
+  bot.dig(targetBlock)
+    .then(() => {
+      console.log(`JS: Successfully mined ${blockTypeName} at ${x},${y},${z} for operationId ${operationId}`);
+      if (global.python) {
+        global.python.emit('mineflayerTaskComplete', {
+          operationId,
+          status: "success",
+          collected_item: blockTypeName,
+          message: `Successfully mined ${blockTypeName}`
+        });
+      }
+    })
+    .catch((err) => {
+      console.error(`JS: Mining failed for ${blockTypeName} at ${x},${y},${z} for operationId ${operationId}: ${err.message}`);
+      if (global.python) {
+        global.python.emit('mineflayerTaskComplete', {
+          operationId,
+          status: "error",
+          message: `Mining failed: ${err.message}`
+        });
+      }
+    });
+
+  return { status: "pending", operationId: operationId, message: `Mining of ${blockTypeName} at (${x},${y},${z}) initiated.` };
 }
 
 function getInventory() {
@@ -147,48 +245,120 @@ function getInventory() {
     return { status: "success", inventory: items };
 }
 
-async function craftItem(itemName, quantity, recipeShape, ingredients, craftingTableNeeded) {
-    if (!bot || !mcData) return { status: "error", message: "Bot not initialized or mcData not available." };
+async function craftItem(itemName, quantity, recipeShape, ingredients, craftingTableNeeded, operationId) {
+    if (!bot || !mcData) {
+        const errorResult = { operationId, status: "error", message: "Bot not initialized or mcData not available." };
+        if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+        return errorResult;
+    }
+    console.log(`JS: craftItem(${itemName}, ${quantity}) called with operationId: ${operationId}`);
 
     const item = mcData.itemsByName[itemName];
-    if (!item) return { status: "error", message: `Unknown item: ${itemName}` };
+    if (!item) {
+        const errorResult = { operationId, status: "error", message: `Unknown item: ${itemName}` };
+        if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+        return errorResult;
+    }
 
-    const recipes = bot.recipesFor(item.id, null, 1, craftingTableNeeded ? bot.findBlock({ matching: mcData.blocksByName.crafting_table.id }) : null);
+    const craftingTableId = mcData.blocksByName.crafting_table ? mcData.blocksByName.crafting_table.id : null;
+    if (craftingTableNeeded && !craftingTableId) {
+        const errorResult = { operationId, status: "error", message: "Crafting table block ID not found in mcData." };
+        if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+        return errorResult;
+    }
+    
+    const craftingTableBlock = craftingTableNeeded ? bot.findBlock({ matching: craftingTableId, maxDistance: 64 }) : null;
+    if (craftingTableNeeded && !craftingTableBlock) {
+        const errorResult = { operationId, status: "error", message: "Crafting table not found nearby." };
+        if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+        return errorResult;
+    }
+
+    const recipes = bot.recipesFor(item.id, null, 1, craftingTableBlock);
     if (!recipes || recipes.length === 0) {
-        return { status: "error", message: `No recipe found for ${itemName}` + (craftingTableNeeded ? " with a crafting table." : ".") };
+        const errorMsg = `No recipe found for ${itemName}` + (craftingTableNeeded ? " with a crafting table nearby." : " in inventory.");
+        const errorResult = { operationId, status: "error", message: errorMsg };
+        if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+        return errorResult;
     }
+    
+    const recipeToUse = recipes[0];
 
-    const recipeToUse = recipes;
-
-    try {
-        await bot.craft(recipeToUse, quantity, craftingTableNeeded ? bot.findBlock({ matching: mcData.blocksByName.crafting_table.id }) : null);
-        return { status: "success", crafted_item: itemName, quantity_crafted: quantity };
-    } catch (err) {
-        return { status: "error", message: `Crafting failed: ${err.message}` };
-    }
+    bot.craft(recipeToUse, quantity, craftingTableBlock)
+        .then(() => {
+            console.log(`JS: Successfully crafted ${quantity} of ${itemName} for operationId ${operationId}`);
+            if (global.python) {
+                global.python.emit('mineflayerTaskComplete', {
+                    operationId,
+                    status: "success",
+                    crafted_item: itemName,
+                    quantity_crafted: quantity
+                });
+            }
+        })
+        .catch((err) => {
+            console.error(`JS: Crafting failed for ${itemName} (operationId ${operationId}): ${err.message}`);
+            if (global.python) {
+                global.python.emit('mineflayerTaskComplete', {
+                    operationId,
+                    status: "error",
+                    message: `Crafting failed: ${err.message}`
+                });
+            }
+        });
+    
+    return { status: "pending", operationId: operationId, message: `Crafting of ${quantity} ${itemName}(s) initiated.` };
 }
 
-async function placeBlock(itemName, x, y, z, refBlockX, refBlockY, refBlockZ, faceVectorX, faceVectorY, faceVectorZ) {
-    if (!bot || !mcData) return { status: "error", message: "Bot not initialized or mcData not available." };
+async function placeBlock(itemName, x, y, z, refBlockX, refBlockY, refBlockZ, faceVectorX, faceVectorY, faceVectorZ, operationId) {
+    if (!bot || !mcData) {
+        const errorResult = { operationId, status: "error", message: "Bot not initialized or mcData not available." };
+        if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+        return errorResult;
+    }
+    console.log(`JS: placeBlock(${itemName}) at ref (${refBlockX},${refBlockY},${refBlockZ}) face (${faceVectorX},${faceVectorY},${faceVectorZ}) called with operationId: ${operationId}`);
 
     const itemToPlace = bot.inventory.items().find(item => item.name === itemName);
     if (!itemToPlace) {
-        return { status: "error", message: `Item ${itemName} not in inventory.` };
+        const errorResult = { operationId, status: "error", message: `Item ${itemName} not in inventory.` };
+        if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+        return errorResult;
     }
 
     const referenceBlock = bot.blockAt(new Vec3(refBlockX, refBlockY, refBlockZ));
     if (!referenceBlock) {
-        return { status: "error", message: "Reference block not found." };
+        const errorResult = { operationId, status: "error", message: "Reference block not found." };
+        if (global.python) global.python.emit('mineflayerTaskComplete', errorResult);
+        return errorResult;
     }
     const faceVec = new Vec3(faceVectorX, faceVectorY, faceVectorZ);
 
-    try {
-        await bot.equip(itemToPlace, 'hand'); // Equip the item first
-        await bot.placeBlock(referenceBlock, faceVec);
-        return { status: "success", message: `Placed ${itemName} at relative location.` };
-    } catch (err) {
-        return { status: "error", message: `Placing block failed: ${err.message}` };
-    }
+    bot.equip(itemToPlace, 'hand')
+      .then(() => bot.placeBlock(referenceBlock, faceVec))
+      .then(() => {
+        const placedLocation = {x: refBlockX + faceVectorX, y: refBlockY + faceVectorY, z: refBlockZ + faceVectorZ};
+        console.log(`JS: Successfully placed ${itemName} near (${refBlockX},${refBlockY},${refBlockZ}) for operationId ${operationId}. Placed at: ${JSON.stringify(placedLocation)}`);
+        if (global.python) {
+          global.python.emit('mineflayerTaskComplete', {
+            operationId,
+            status: "success",
+            message: `Placed ${itemName}.`,
+            placed_location: placedLocation
+          });
+        }
+      })
+      .catch((err) => {
+        console.error(`JS: Placing block ${itemName} failed for operationId ${operationId}: ${err.message}`);
+        if (global.python) {
+          global.python.emit('mineflayerTaskComplete', {
+            operationId,
+            status: "error",
+            message: `Placing block failed: ${err.message}`
+          });
+        }
+      });
+
+    return { status: "pending", operationId: operationId, message: `Placing of ${itemName} initiated.` };
 }
 
 module.exports = {

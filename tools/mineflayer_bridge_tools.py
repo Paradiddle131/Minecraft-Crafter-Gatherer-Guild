@@ -1,9 +1,11 @@
-from javascript import require
+import uuid
+import asyncio
+from javascript import require, On
 from javascript.proxy import Proxy
 from typing import Optional, Dict, List, Any
-
 from pydantic import ValidationError as PydanticValidationError
 
+from config import settings
 from src.models.mineflayer_bridge.responses import (
     BotInitializationResponse,
     NavigationResponse,
@@ -15,13 +17,17 @@ from src.models.mineflayer_bridge.responses import (
     MemorizeRecipeResponse,
 )
 
-from google.adk.tools import ToolContext, FunctionTool
+from google.adk.tools import ToolContext, FunctionTool, LongRunningFunctionTool
 
-from config import settings
 from logging_config import logger
 
 # Global variable to hold the JavaScript module interface
 mineflayer_js_interface: Optional[Any] = None
+
+# Maps operationId to a tuple of (ADK function_call_id, original_tool_name)
+_pending_operations: Dict[str, tuple[str, str]] = {}
+# Queue for JS task results
+_operation_results_queue: Optional[asyncio.Queue] = None
 
 def _get_data_from_proxy(proxy: Optional[Proxy]) -> Dict[str, Any]:
     """
@@ -42,13 +48,16 @@ def _get_data_from_proxy(proxy: Optional[Proxy]) -> Dict[str, Any]:
             return {"status": "error", "message": "Failed to extract data from JS Proxy"}
     return proxy if isinstance(proxy, dict) else {"status": "error", "message": f"Unexpected type '{type(proxy)}' received, not Proxy or dict."}
 
-async def initialize_mineflayer_bridge() -> dict:
+
+async def initialize_mineflayer_bridge(operation_results_queue: asyncio.Queue) -> dict:
     """
     Initializes the JSPyBridge connection to the Mineflayer JavaScript interface
     and initializes the Mineflayer bot. This should be called once.
+    Sets up an event listener for task completions from JavaScript.
     Returns a dictionary representation of BotInitializationResponse.
     """
-    global mineflayer_js_interface
+    global mineflayer_js_interface, _operation_results_queue
+    _operation_results_queue = operation_results_queue
     logger.info("Attempting to initialize Mineflayer bridge...")
 
     if mineflayer_js_interface:
@@ -95,37 +104,48 @@ async def initialize_mineflayer_bridge() -> dict:
         logger.error(f"Error calling initializeBot on JS interface: {e}")
         return BotInitializationResponse(status="error", message=f"Error during JS initializeBot call: {e}").model_dump(exclude_none=True)
 
-initialize_mineflayer_tool = FunctionTool(
-    func=initialize_mineflayer_bridge
-)
-
-def move_to_xyz_via_js(x: int, y: int, z: int, tool_context: ToolContext) -> dict:
+def _execute_long_running_js_task(js_function_name: str, tool_context: ToolContext, *args) -> dict:
     """
-    Navigates the Mineflayer bot to the specified X, Y, Z coordinates.
-    Returns a dictionary representation of NavigationResponse.
+    Helper to initiate a long-running JS task and return a pending response.
     """
-    assert mineflayer_js_interface is not None, "Mineflayer JS interface not initialized. Call initialize_mineflayer_tool first."
-    logger.info(f"Calling JS goToXYZ({x}, {y}, {z})")
-    try:
-        result_proxy = mineflayer_js_interface.goToXYZ(x, y, z)
-        data_for_validation = _get_data_from_proxy(result_proxy)
-        validated_result = NavigationResponse.model_validate(data_for_validation)
-        return validated_result.model_dump(exclude_none=True)
-    except PydanticValidationError as ve:
-        logger.error(f"Pydantic validation error for goToXYZ response: {ve}")
-        return NavigationResponse(status="error", message=f"Invalid response structure from JS: {ve}").model_dump(exclude_none=True)
-    except Exception as e:
-        logger.error(f"Error in move_to_xyz_via_js: {e}")
-        return NavigationResponse(status="error", message=str(e)).model_dump(exclude_none=True)
+    assert mineflayer_js_interface is not None, "Mineflayer JS interface not initialized."
+    
+    operation_id = str(uuid.uuid4())
+    _pending_operations[operation_id] = (tool_context.function_call_id, js_function_name)
+    
+    logger.info(f"Calling JS {js_function_name} with operationId {operation_id} and args: {args}")
+    
+    js_function = getattr(mineflayer_js_interface, js_function_name)
+    js_args = list(args)
+    js_args.append(operation_id)
+    result_proxy = js_function(*js_args)
+    
+    pending_response_data = _get_data_from_proxy(result_proxy)
+    
+    if not isinstance(pending_response_data, dict) or pending_response_data.get("status") != "pending":
+        logger.error(f"JS function {js_function_name} did not return a 'pending' status. Response: {pending_response_data}")
+        _pending_operations.pop(operation_id, None)
+        return {"status": "error", "message": f"Failed to initiate {js_function_name} correctly. JS response: {pending_response_data}"}
 
-move_to_xyz_tool = FunctionTool(
-    func=move_to_xyz_via_js
+    logger.info(f"JS task {js_function_name} (opId: {operation_id}) initiated, ADK callId: {tool_context.function_call_id}. Pending response: {pending_response_data}")
+    return pending_response_data
+
+def move_to_xyz_via_js_long_running(x: int, y: int, z: int, tool_context: ToolContext) -> dict:
+    """
+    Initiates navigation of the Mineflayer bot to X, Y, Z coordinates.
+    Returns an initial "pending" response with an operation ID.
+    """
+    return _execute_long_running_js_task("goToXYZ", tool_context, x, y, z)
+
+move_to_xyz_tool = LongRunningFunctionTool(
+    func=move_to_xyz_via_js_long_running
 )
 
 def find_nearest_block_via_js(block_type: str, tool_context: ToolContext) -> dict:
     """
     Finds the nearest block of the specified type near the Mineflayer bot.
     Returns a dictionary representation of FindBlockResponse.
+    This is a synchronous, quick operation.
     """
     assert mineflayer_js_interface is not None, "Mineflayer JS interface not initialized. Call initialize_mineflayer_tool first."
     logger.info(f"Calling JS findBlock('{block_type}')")
@@ -145,33 +165,22 @@ find_nearest_block_tool = FunctionTool(
     func=find_nearest_block_via_js
 )
 
-def mine_target_block_via_js(block_type: str, x: int, y: int, z: int, tool_context: ToolContext) -> dict:
+def mine_target_block_via_js_long_running(block_type: str, x: int, y: int, z: int, tool_context: ToolContext) -> dict:
     """
-    Commands the Mineflayer bot to mine a specific block at given coordinates.
-    Returns a dictionary representation of MineBlockResponse.
+    Initiates mining a specific block at given coordinates.
+    Returns an initial "pending" response with an operation ID.
     """
-    assert mineflayer_js_interface is not None, "Mineflayer JS interface not initialized. Call initialize_mineflayer_tool first."
-    logger.info(f"Calling JS mineBlock('{block_type}', {x}, {y}, {z})")
-    try:
-        result_proxy = mineflayer_js_interface.mineBlock(block_type, x, y, z)
-        data_for_validation = _get_data_from_proxy(result_proxy)
-        validated_result = MineBlockResponse.model_validate(data_for_validation)
-        return validated_result.model_dump(exclude_none=True)
-    except PydanticValidationError as ve:
-        logger.error(f"Pydantic validation error for mineBlock response: {ve}")
-        return MineBlockResponse(status="error", message=f"Invalid response structure from JS: {ve}").model_dump(exclude_none=True)
-    except Exception as e:
-        logger.error(f"Error in mine_target_block_via_js: {e}")
-        return MineBlockResponse(status="error", message=str(e)).model_dump(exclude_none=True)
+    return _execute_long_running_js_task("mineBlock", tool_context, block_type, x, y, z)
 
-mine_target_block_tool = FunctionTool(
-    func=mine_target_block_via_js
+mine_target_block_tool = LongRunningFunctionTool(
+    func=mine_target_block_via_js_long_running
 )
 
 def view_bot_inventory_via_js(tool_context: ToolContext) -> dict:
     """
     Retrieves the current inventory of the Mineflayer bot.
     Returns a dictionary representation of InventoryResponse.
+    This is a synchronous, quick operation.
     """
     assert mineflayer_js_interface is not None, "Mineflayer JS interface not initialized. Call initialize_mineflayer_tool first."
     logger.info("Calling JS getInventory()")
@@ -191,7 +200,7 @@ view_bot_inventory_tool = FunctionTool(
     func=view_bot_inventory_via_js
 )
 
-def craft_target_item_via_js(
+def craft_target_item_via_js_long_running(
     item_name: str,
     quantity: int,
     recipe_shape: Optional[List[List[Optional[str]]]],
@@ -200,28 +209,16 @@ def craft_target_item_via_js(
     tool_context: ToolContext
 ) -> dict:
     """
-    Commands the Mineflayer bot to craft a specified item.
-    Returns a dictionary representation of CraftItemResponse.
+    Initiates crafting a specified item.
+    Returns an initial "pending" response with an operation ID.
     """
-    assert mineflayer_js_interface is not None, "Mineflayer JS interface not initialized. Call initialize_mineflayer_tool first."
-    logger.info(f"Calling JS craftItem('{item_name}', {quantity}, recipe_shape_provided={recipe_shape is not None}, ingredients_provided={ingredients is not None}, crafting_table_needed={crafting_table_needed})")
-    try:
-        result_proxy = mineflayer_js_interface.craftItem(item_name, quantity, recipe_shape, ingredients, crafting_table_needed)
-        data_for_validation = _get_data_from_proxy(result_proxy)
-        validated_result = CraftItemResponse.model_validate(data_for_validation)
-        return validated_result.model_dump(exclude_none=True)
-    except PydanticValidationError as ve:
-        logger.error(f"Pydantic validation error for craftItem response: {ve}")
-        return CraftItemResponse(status="error", message=f"Invalid response structure from JS: {ve}").model_dump(exclude_none=True)
-    except Exception as e:
-        logger.error(f"Error in craft_target_item_via_js: {e}")
-        return CraftItemResponse(status="error", message=str(e)).model_dump(exclude_none=True)
+    return _execute_long_running_js_task("craftItem", tool_context, item_name, quantity, recipe_shape, ingredients, crafting_table_needed)
 
-craft_target_item_tool = FunctionTool(
-    func=craft_target_item_via_js
+craft_target_item_tool = LongRunningFunctionTool(
+    func=craft_target_item_via_js_long_running
 )
 
-def place_item_block_via_js(
+def place_item_block_via_js_long_running(
     item_name: str,
     ref_block_x: int,
     ref_block_y: int,
@@ -232,40 +229,21 @@ def place_item_block_via_js(
     tool_context: ToolContext
 ) -> dict:
     """
-    Commands the Mineflayer bot to place a block item from its inventory.
-    Returns a dictionary representation of PlaceBlockResponse.
+    Initiates placing a block item from its inventory.
+    Returns an initial "pending" response with an operation ID.
+
+    The JS placeBlock function expects dummy x,y,z for the block to be placed,
+    which are not used if ref_block and face_vector are provided for relative placement.
+    We pass 0,0,0 as placeholders for these unused absolute coordinates.
     """
-    assert mineflayer_js_interface is not None, "Mineflayer JS interface not initialized. Call initialize_mineflayer_tool first."
-    logger.info(f"Calling JS placeBlock('{item_name}', ref_block=({ref_block_x},{ref_block_y},{ref_block_z}), face_vector=({face_vector_x},{face_vector_y},{face_vector_z}))")
-    try:
-        js_result_proxy = mineflayer_js_interface.placeBlock(
-            item_name, 0, 0, 0,
-            ref_block_x, ref_block_y, ref_block_z,
-            face_vector_x, face_vector_y, face_vector_z
-        )
-        data_for_validation = _get_data_from_proxy(js_result_proxy)
-        
-        if data_for_validation and data_for_validation.get("status") == "success":
-            placed_x = ref_block_x + face_vector_x
-            placed_y = ref_block_y + face_vector_y
-            placed_z = ref_block_z + face_vector_z
-            data_for_validation["placed_location"] = {"x": placed_x, "y": placed_y, "z": placed_z}
-            logger.info(f"Block '{item_name}' placed at ({placed_x},{placed_y},{placed_z}).")
-        
-        validated_result = PlaceBlockResponse.model_validate(data_for_validation)
-        return validated_result.model_dump(exclude_none=True)
-    except PydanticValidationError as ve:
-        logger.error(f"Pydantic validation error for placeBlock response: {ve}")
-        return PlaceBlockResponse(status="error", message=f"Invalid response structure from JS: {ve}").model_dump(exclude_none=True)
-    except Exception as e:
-        logger.error(f"Error in place_item_block_via_js: {e}")
-        return PlaceBlockResponse(status="error", message=str(e)).model_dump(exclude_none=True)
+    return _execute_long_running_js_task("placeBlock", tool_context,
+                                         item_name, 0, 0, 0,
+                                         ref_block_x, ref_block_y, ref_block_z,
+                                         face_vector_x, face_vector_y, face_vector_z)
 
-place_item_block_tool = FunctionTool(
-    func=place_item_block_via_js
+place_item_block_tool = LongRunningFunctionTool(
+    func=place_item_block_via_js_long_running
 )
-
-
 
 async def memorize_recipe(
     item_name: str,

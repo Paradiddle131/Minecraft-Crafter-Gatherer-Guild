@@ -18,7 +18,7 @@ class GathererAgent(LlmAgent):
         super().__init__(
             model=settings.gemini_model_name,
             name="GathererAgent",
-            description="Collects resources like wood, stone, etc., and can place blocks in Minecraft.",
+            description="Collects resources like wood, stone, etc., and can mine and place blocks in Minecraft.",
             instruction=GATHERER_AGENT_INSTRUCTION,
             tools=[
                 find_nearest_block_tool,
