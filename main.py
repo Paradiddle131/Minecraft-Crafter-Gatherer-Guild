@@ -8,7 +8,7 @@ from config import settings
 from logging_config import logger
 
 from agents.coordinator_agent import CoordinatorAgent
-from javascript.proxy import Proxy
+from src.models.mineflayer_bridge.responses import BotInitializationResponse
 
 APP_NAME = "CrafterGathererGuildApp"
 USER_ID = "test_user_001"
@@ -51,7 +51,7 @@ async def run_pickaxe_crafting_task():
         "last_sub_task_result": None,
         "current_high_level_goal": "craft 1 wooden_pickaxe"
     }
-    session = session_service.create_session(
+    _session = session_service.create_session(
         app_name=APP_NAME,
         user_id=USER_ID,
         session_id=SESSION_ID_MAIN,
@@ -77,10 +77,11 @@ async def run_pickaxe_crafting_task():
     logger.info("Attempting to initialize Mineflayer bridge directly...")
     try:
         from tools.mineflayer_bridge_tools import initialize_mineflayer_bridge
-        init_result: Proxy = await initialize_mineflayer_bridge()
+        init_result_dict: dict = await initialize_mineflayer_bridge()
+        init_result = BotInitializationResponse.model_validate(init_result_dict)
 
         if init_result.status == "success" or init_result.status == "already_initialized":
-            logger.info(f"Mineflayer bridge initialization reported: {init_result.message} (Username: {init_result.username if hasattr(init_result, 'username') else 'N/A'})")
+            logger.info(f"Mineflayer bridge initialization reported: {init_result.message} (Username: {init_result.username if init_result.username else 'N/A'})")
         else:
             logger.error(f"Mineflayer bridge initialization failed: {init_result.message}")
             logger.error("Cannot proceed without Mineflayer bridge. Exiting.")
@@ -128,7 +129,7 @@ async def run_pickaxe_crafting_task():
     except Exception as e:
         logger.error(f"An error occurred during the agent run: {e}", exc_info=True)
     finally:
-        logger.info(f"\n--- Task Execution Ended ---")
+        logger.info("\n--- Task Execution Ended ---")
         logger.info(f"Coordinator's Final Report: {final_response_text}")
 
         final_session = session_service.get_session(
