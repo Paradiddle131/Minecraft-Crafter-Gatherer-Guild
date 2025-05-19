@@ -1,5 +1,5 @@
 from google.adk.agents import LlmAgent
-from google.adk.tools import google_search
+# from google.adk.tools import google_search
 from .prompts import CRAFTER_AGENT_INSTRUCTION
 from tools.mineflayer_bridge_tools import (
     craft_target_item_tool,
@@ -22,7 +22,7 @@ class CrafterAgent(LlmAgent):
             tools=[
                 craft_target_item_tool,
                 view_bot_inventory_tool,
-                google_search,
+                # google_search, # Raising "Tool use with function calling is unsupported" error with status code 400
                 memorize_recipe_tool
             ],
             output_key="crafter_status"
