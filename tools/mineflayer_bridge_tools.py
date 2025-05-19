@@ -1,6 +1,6 @@
 import uuid
 import asyncio
-from javascript import require, On
+from javascript import require
 from javascript.proxy import Proxy
 from typing import Optional, Dict, List, Any
 from pydantic import ValidationError as PydanticValidationError
@@ -8,12 +8,8 @@ from pydantic import ValidationError as PydanticValidationError
 from config import settings
 from src.models.mineflayer_bridge.responses import (
     BotInitializationResponse,
-    NavigationResponse,
     FindBlockResponse,
-    MineBlockResponse,
     InventoryResponse,
-    CraftItemResponse,
-    PlaceBlockResponse,
     MemorizeRecipeResponse,
 )
 
@@ -130,15 +126,50 @@ def _execute_long_running_js_task(js_function_name: str, tool_context: ToolConte
     logger.info(f"JS task {js_function_name} (opId: {operation_id}) initiated, ADK callId: {tool_context.function_call_id}. Pending response: {pending_response_data}")
     return pending_response_data
 
-def move_to_xyz_via_js_long_running(x: int, y: int, z: int, tool_context: ToolContext) -> dict:
+def move_to_xyz_via_js_synchronous(x: int, y: int, z: int, tool_context: ToolContext) -> dict:
     """
-    Initiates navigation of the Mineflayer bot to X, Y, Z coordinates.
-    Returns an initial "pending" response with an operation ID.
+    Navigates the Mineflayer bot to X, Y, Z coordinates and waits for completion.
+    Returns the final success/error dictionary.
     """
-    return _execute_long_running_js_task("goToXYZ", tool_context, x, y, z)
+    assert mineflayer_js_interface is not None, "Mineflayer JS interface not initialized."
+    assert _operation_results_queue is not None, "Operation results queue not initialized."
 
-move_to_xyz_tool = LongRunningFunctionTool(
-    func=move_to_xyz_via_js_long_running
+    operation_id = str(uuid.uuid4())
+    _pending_operations[operation_id] = (tool_context.function_call_id, "goToXYZ_sync")
+
+    logger.info(f"Calling JS goToXYZ (synchronous wrapper) with operationId {operation_id} and args: ({x}, {y}, {z})")
+
+    try:
+        js_function = getattr(mineflayer_js_interface, "goToXYZ")
+        # Set timeout for the python-javascript bridge call, allowing JS to manage its own longer timeouts.
+        python_to_js_call_timeout_ms = 600000
+        logger.info(f"Calling JS goToXYZ with Python-to-JS bridge timeout: {python_to_js_call_timeout_ms}ms")
+        promise_proxy = js_function(x, y, z, operation_id, timeout=python_to_js_call_timeout_ms)
+
+        logger.info(f"Awaiting JS goToXYZ promise for operationId {operation_id}...")
+        result_data = _get_data_from_proxy(promise_proxy)
+        logger.info(f"JS goToXYZ promise for operationId {operation_id} resolved. Result: {result_data}")
+
+        _pending_operations.pop(operation_id, None)
+        
+        if not isinstance(result_data, dict) or "status" not in result_data:
+            logger.error(f"goToXYZ (sync) for opId {operation_id} returned malformed data: {result_data}")
+            error_response = {"status": "error", "message": f"goToXYZ (sync) returned malformed data: {result_data}"}
+            if "operationId" in result_data: # if JS included it in a non-promise error
+                error_response["operationId"] = result_data["operationId"]
+            elif operation_id:
+                error_response["operationId"] = operation_id
+            return error_response
+        
+        return result_data
+
+    except Exception as e:
+        logger.error(f"Error in move_to_xyz_via_js_synchronous (opId: {operation_id}): {e}", exc_info=True)
+        _pending_operations.pop(operation_id, None)
+        return {"status": "error", "message": f"Python wrapper error for goToXYZ (sync): {str(e)}", "operationId": operation_id}
+
+move_to_xyz_tool = FunctionTool(
+    func=move_to_xyz_via_js_synchronous
 )
 
 def find_nearest_block_via_js(block_type: str, tool_context: ToolContext) -> dict:
@@ -290,7 +321,7 @@ memorize_recipe_tool = FunctionTool(
 )
 
 __all__ = [
-    "initialize_mineflayer_tool",
+    "initialize_mineflayer_bridge",
     "move_to_xyz_tool",
     "find_nearest_block_tool",
     "mine_target_block_tool",
@@ -298,6 +329,5 @@ __all__ = [
     "craft_target_item_tool",
     "place_item_block_tool",
     "memorize_recipe_tool",
-    "initialize_mineflayer_bridge",
     "memorize_recipe"
 ]
